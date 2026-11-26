@@ -642,7 +642,7 @@ elif page == "🏋️ Model Training":
                     "id":                 model_id,
                     "display_name":       f"Candidate ({'11-class Rejection' if supports_rejection else '10-class'} — {datetime.now().strftime('%Y-%m-%d %H:%M')})",
                     "kind":               "candidate",
-                    "keras_path":         str(saved_path),
+                    "keras_path":         saved_path.as_posix(),
                     "created_at":         datetime.now().isoformat(),
                     "dataset_path":       st.session_state.get("dataset_path"),
                     "train_count":        st.session_state["split_counts"]["train"],

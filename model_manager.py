@@ -164,10 +164,15 @@ def load_model_by_id(model_id: str):
     if rec is None:
         raise ValueError(f"No registry entry found for model_id={model_id!r}")
 
-    keras_path = Path(rec["keras_path"])
+    raw_path = str(rec["keras_path"]).replace("\\", "/")
+    keras_path = Path(raw_path)
     if not keras_path.is_absolute():
         # Paths in registry are stored relative to project root
         keras_path = keras_path.resolve()
+    if not keras_path.exists():
+        fallback = (VERSIONS_DIR / f"{model_id}.keras").resolve()
+        if fallback.exists():
+            keras_path = fallback
     return keras.models.load_model(str(keras_path))
 
 
