@@ -4,6 +4,10 @@ dataset_utils.py — Dataset scanning, class mapping, splitting, and array build
 Key invariant: preprocess() from preprocess.py is the ONLY pixel transformation used.
 """
 import random
+import shutil
+import tarfile
+import tempfile
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -293,3 +297,107 @@ def dataset_stats(scan_result: dict) -> dict:
         "has_other": has_other,
         "num_classes": 11 if has_other else 10,
     }
+
+
+# ─── Archive extraction (for uploaded datasets) ───────────────────────────────
+
+SUPPORTED_ARCHIVE_EXT = (".zip", ".tar", ".tar.gz", ".tgz")
+
+
+def _safe_member_target(dest_root: Path, member_name: str) -> Path:
+    """Resolve member_name under dest_root and block path-traversal / absolute paths."""
+    rel = Path(member_name)
+    if rel.is_absolute() or (rel.parts and ":" in rel.parts[0]):
+        raise ValueError(f"Unsafe archive entry path: {member_name}")
+    target = (dest_root / rel).resolve()
+    if not target.is_relative_to(dest_root.resolve()):
+        raise ValueError(f"Unsafe archive entry path escapes target directory: {member_name}")
+    return target
+
+
+def _is_macos_junk(parts: tuple) -> bool:
+    return any(p == "__MACOSX" or p.startswith("._") for p in parts)
+
+
+def _find_dataset_root(extract_dir: Path, max_depth: int = 2) -> Path:
+    """
+    Locate the directory containing class subfolders.
+    Handles archives zipped either flat (T-shirt_top/...) or with a top-level wrapper
+    folder (MyDataset/T-shirt_top/...).
+    """
+    current = extract_dir
+    for _ in range(max_depth + 1):
+        subdirs = [
+            d for d in current.iterdir()
+            if d.is_dir() and not d.name.startswith(".") and d.name != "__MACOSX"
+        ]
+        if any(resolve_class_name(d.name) is not None for d in subdirs):
+            return current
+        if len(subdirs) == 1:
+            current = subdirs[0]
+        else:
+            break
+    return extract_dir
+
+
+def extract_dataset_archive(file_obj, filename: str, dest_dir: Path | None = None) -> tuple[Path, Path]:
+    """
+    Safely extracts a .zip, .tar, .tar.gz, or .tgz dataset archive into a temp directory.
+
+    Returns:
+        (temp_root_dir, dataset_root_dir)
+        where dataset_root_dir is ready to pass to scan_dataset().
+    """
+    lower_name = filename.lower()
+    if not any(lower_name.endswith(ext) for ext in SUPPORTED_ARCHIVE_EXT):
+        raise ValueError(
+            f"Unsupported archive format for '{filename}'. "
+            f"Supported formats: {', '.join(SUPPORTED_ARCHIVE_EXT)}"
+        )
+
+    temp_root = Path(dest_dir) if dest_dir is not None else Path(tempfile.mkdtemp(prefix="fashion_ds_"))
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if hasattr(file_obj, "seek"):
+            file_obj.seek(0)
+
+        if lower_name.endswith(".zip"):
+            with zipfile.ZipFile(file_obj) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    rel_parts = Path(info.filename).parts
+                    if not rel_parts or _is_macos_junk(rel_parts):
+                        continue
+                    target = _safe_member_target(temp_root, info.filename)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info, "r") as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        else:
+            with tarfile.open(fileobj=file_obj, mode="r:*") as tf:
+                for member in tf.getmembers():
+                    if not member.isfile():
+                        continue
+                    rel_parts = Path(member.name).parts
+                    if not rel_parts or _is_macos_junk(rel_parts):
+                        continue
+                    target = _safe_member_target(temp_root, member.name)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    src = tf.extractfile(member)
+                    if src is None:
+                        continue
+                    with src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+    except Exception:
+        if dest_dir is None:
+            shutil.rmtree(temp_root, ignore_errors=True)
+        raise
+
+    return temp_root, _find_dataset_root(temp_root)
+
+
+def cleanup_extracted_dir(temp_root: str | Path | None) -> None:
+    """Best-effort cleanup for temporary extracted dataset directories."""
+    if temp_root:
+        shutil.rmtree(temp_root, ignore_errors=True)

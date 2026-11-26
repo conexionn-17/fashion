@@ -372,60 +372,127 @@ elif page == "🏋️ Model Training":
 
     # ── 1. Dataset ────────────────────────────────────────────────────────────
     st.subheader("1. Dataset")
-    folder_path = st.text_input(
-        "Dataset folder path",
-        placeholder=r"D:\FashionDataset",
-        help="Local path on this computer. Each sub-folder = one clothing category.",
+    dataset_source = st.radio(
+        "Dataset source",
+        ["Upload archive (.zip / .tar.gz)", "Local folder path"],
+        horizontal=True,
+        key="train_dataset_source",
     )
+
+    folder_path = ""
+    uploaded_archive = None
+    if dataset_source == "Upload archive (.zip / .tar.gz)":
+        uploaded_archive = st.file_uploader(
+            "Upload dataset archive (.zip, .tar, .tar.gz, .tgz)",
+            type=["zip", "tar", "gz", "tgz"],
+            help="Archive containing one sub-folder per class (e.g. T-shirt_top/, Trouser/, ..., and optional Other/).",
+            key="train_dataset_uploader",
+        )
+        with st.expander("Expected archive folder structure"):
+            st.code(
+                "dataset.zip\n"
+                "├── T-shirt_top/\n"
+                "├── Trouser/\n"
+                "├── Pullover/\n"
+                "├── Dress/\n"
+                "├── Coat/\n"
+                "├── Sandal/\n"
+                "├── Shirt/\n"
+                "├── Sneaker/\n"
+                "├── Bag/\n"
+                "├── Ankle_boot/\n"
+                "└── Other/          # optional (enables 11-class non-clothing rejection)",
+                language="text",
+            )
+    else:
+        folder_path = st.text_input(
+            "Dataset folder path",
+            placeholder=r"D:\FashionDataset",
+            help="Local path on this computer. Each sub-folder = one clothing category.",
+        )
 
     col1, col2 = st.columns([1, 4])
     validate_btn = col1.button("🔍 Validate Dataset")
 
-    if validate_btn and folder_path:
-        with st.spinner("Scanning dataset…"):
-            scan = dataset_utils.scan_dataset(folder_path)
+    if validate_btn:
+        scan = None
+        dataset_label = None
 
-        if scan["errors"]:
-            for e in scan["errors"]:
-                st.error(e)
-        else:
-            st.success(
-                f"✅ Dataset valid — {scan['total_valid']} images "
-                f"in {len(scan['matched_classes'])} categories"
-            )
-            if scan.get("has_other"):
-                st.success(
-                    f"🛡️ **Non-clothing category detected ('{OTHER_CLASS}')!** "
-                    "The new candidate model will be trained with 11 output classes and will support non-clothing rejection."
-                )
+        if dataset_source == "Upload archive (.zip / .tar.gz)":
+            if uploaded_archive is None:
+                st.warning("Please upload a dataset archive (.zip, .tar, .tar.gz, or .tgz) first.")
             else:
-                st.info("ℹ️ 10 clothing categories detected. Candidate model will have 10 output classes.")
+                dataset_utils.cleanup_extracted_dir(
+                    st.session_state.pop("extracted_dataset_tmp_dir", None)
+                )
+                st.session_state.pop("scan_result", None)
+                with st.spinner("Extracting and scanning uploaded dataset…"):
+                    try:
+                        tmp_root, scan_root = dataset_utils.extract_dataset_archive(
+                            uploaded_archive, uploaded_archive.name
+                        )
+                        scan = dataset_utils.scan_dataset(str(scan_root))
+                        if scan["errors"]:
+                            dataset_utils.cleanup_extracted_dir(tmp_root)
+                        else:
+                            st.session_state["extracted_dataset_tmp_dir"] = str(tmp_root)
+                            dataset_label = f"uploaded:{uploaded_archive.name}"
+                    except Exception as ex:
+                        st.error(f"Could not extract archive: {ex}")
+        else:
+            if not folder_path.strip():
+                st.warning("Please enter a dataset folder path.")
+            else:
+                dataset_utils.cleanup_extracted_dir(
+                    st.session_state.pop("extracted_dataset_tmp_dir", None)
+                )
+                st.session_state.pop("scan_result", None)
+                with st.spinner("Scanning dataset…"):
+                    scan = dataset_utils.scan_dataset(folder_path.strip())
+                    dataset_label = folder_path.strip()
 
-            rows = [
-                {"Class": c, "Images": len(imgs), "Role": "Negative Example (Reject)" if c == OTHER_CLASS else "Clothing Category"}
-                for c, imgs in scan["matched_classes"].items()
-            ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        if scan is not None:
+            if scan["errors"]:
+                for e in scan["errors"]:
+                    st.error(e)
+            else:
+                st.success(
+                    f"✅ Dataset valid — {scan['total_valid']} images "
+                    f"in {len(scan['matched_classes'])} categories"
+                )
+                if scan.get("has_other"):
+                    st.success(
+                        f"🛡️ **Non-clothing category detected ('{OTHER_CLASS}')!** "
+                        "The new candidate model will be trained with 11 output classes and will support non-clothing rejection."
+                    )
+                else:
+                    st.info("ℹ️ 10 clothing categories detected. Candidate model will have 10 output classes.")
 
-            train_items, val_items, test_items = dataset_utils.split_dataset(
-                scan["matched_classes"]
-            )
-            dataset_classes = dataset_utils.get_class_names_for_dataset(scan["matched_classes"])
-            st.info(
-                f"Split preview ({len(dataset_classes)} classes): **{len(train_items)}** train / "
-                f"**{len(val_items)}** val / **{len(test_items)}** test"
-            )
+                rows = [
+                    {"Class": c, "Images": len(imgs), "Role": "Negative Example (Reject)" if c == OTHER_CLASS else "Clothing Category"}
+                    for c, imgs in scan["matched_classes"].items()
+                ]
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-            for w in scan["warnings"]:
-                st.warning(w)
-            if scan["corrupt_files"]:
-                st.warning(f"Skipped {len(scan['corrupt_files'])} corrupt files.")
-            if scan["unmatched_folders"]:
-                st.warning(f"Unknown folders (ignored): {scan['unmatched_folders']}")
+                train_items, val_items, test_items = dataset_utils.split_dataset(
+                    scan["matched_classes"]
+                )
+                dataset_classes = dataset_utils.get_class_names_for_dataset(scan["matched_classes"])
+                st.info(
+                    f"Split preview ({len(dataset_classes)} classes): **{len(train_items)}** train / "
+                    f"**{len(val_items)}** val / **{len(test_items)}** test"
+                )
 
-            st.session_state["scan_result"]     = scan
-            st.session_state["dataset_path"]    = folder_path
-            st.session_state["dataset_classes"] = dataset_classes
+                for w in scan["warnings"]:
+                    st.warning(w)
+                if scan["corrupt_files"]:
+                    st.warning(f"Skipped {len(scan['corrupt_files'])} corrupt files.")
+                if scan["unmatched_folders"]:
+                    st.warning(f"Unknown folders (ignored): {scan['unmatched_folders']}")
+
+                st.session_state["scan_result"]     = scan
+                st.session_state["dataset_path"]    = dataset_label
+                st.session_state["dataset_classes"] = dataset_classes
 
     # ── 2. Training config ────────────────────────────────────────────────────
     if "scan_result" in st.session_state:
